@@ -36,10 +36,17 @@
 #include <yarp/sig/PointCloud.h>
 #include <yarp/math/Math.h>
 #include <yarp/cv/Cv.h>
+#include <yarp/pcl/Pcl.h>
 
 #include <opencv2/surface_matching.hpp>
 #include <opencv2/surface_matching/ppf_helpers.hpp>
 #include <opencv2/core/utility.hpp>
+
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/features/normal_3d.h>
+#include <pcl/registration/icp.h>
+#include <pcl/io/ply_io.h>
 
 #include "rpc_IDL.h"
 #include "viewer.h"
@@ -304,9 +311,9 @@ class GrasperModule : public RFModule, public rpc_IDL {
             Vector x{-.25, .3, .1};
             vector<PolyDriver*> polys({&arm_r, &arm_l});
             ICartesianControl* iarm;
-            for (auto poly:polys) {                
+            for (auto poly:polys) {
                 poly->view(iarm);
-                iarm->goToPositionSync(x);                
+                iarm->goToPositionSync(x);
                 x[1] = -x[1];
             }
             // wait only for the last arm
@@ -337,7 +344,7 @@ class GrasperModule : public RFModule, public rpc_IDL {
         }
 
         if ((rgbImage->width() != depthImage->width()) ||
-            (rgbImage->height() != depthImage->height()) ) {
+                (rgbImage->height() != depthImage->height()) ) {
             yError() << "Received image data with wrong size!";
             return false;
         }
@@ -353,13 +360,12 @@ class GrasperModule : public RFModule, public rpc_IDL {
             for (int u = 0; u < w; u++) {
                 const auto rgb = (*rgbImage)(u, v);
                 const auto depth = (*depthImage)(u, v);
-                
                 if (depth > 0.F) {
                     x[0] = depth * (u - .5 * (w - 1)) / fov_h;
                     x[1] = depth * (v - .5 * (h - 1)) / fov_h;
                     x[2] = depth;
                     x = Teye * x;
-                
+
                     pc_scene->push_back(DataXYZRGBA());
                     auto& p = (*pc_scene)(pc_scene->size() - 1);
                     p.x = (float)x[0];
@@ -393,7 +399,7 @@ class GrasperModule : public RFModule, public rpc_IDL {
         viewer->addTable({cam_foc[0], cam_foc[1], cam_foc[2]}, {0., 0., 1.});
         viewer->addObject(pc_object);
         viewer->addCamera({cam_x[0], cam_x[1], cam_x[2]}, {cam_foc[0], cam_foc[1], cam_foc[2]},
-                          {0., 0., 1.}, view_angle);
+        {0., 0., 1.}, view_angle);
 
         if (pc_object->size() > 0) {
             return true;
@@ -429,7 +435,7 @@ class GrasperModule : public RFModule, public rpc_IDL {
     }
 
     /**************************************************************************/
-    bool fit(const string &model_name) override {
+    bool fit(const string &model_name, const string &method="pcl") override {
         // load model
         yInfo() << "Looking for" << model_name;
         string path = rf.findFileByName(model_name);
@@ -437,40 +443,120 @@ class GrasperModule : public RFModule, public rpc_IDL {
             yError() <<"Unable to find model";
             return false;
         }
-        Mat pc_model_mat = loadPLYSimple(path.c_str(), 1);
-        if (!pc_model_mat.data) {
-            yError() <<"Unable to find model";
+
+        if (!pc_object || pc_object->size() < 0) {
+            yError() << "No object to fit";
             return false;
         }
-        yInfo() << "Loaded ply (" << pc_model_mat.rows << "," << pc_model_mat.cols << ")";
-        if (pc_object) {
-            if (pc_object->size() > 0) {
 
-                // Estimate normals
-                Mat pc_object_mat = toCvMat(pc_object);
-                yInfo() << "Point cloud (" << pc_object_mat.rows << "," << pc_object_mat.cols << ")";
-                Mat pc_object_normals;
-                cv::Vec3d viewpoint(0.0, 0.0, 0.0);
-                computeNormalsPC3d(pc_object_mat, pc_object_normals, 6, false, viewpoint);
-                yInfo() << "Point cloud with normals (" << pc_object_normals.rows << "," << pc_object_normals.cols << ")";
+        if (method=="opencv") {
+            // Load model assuming it has normals
+            Mat pc_model_mat = loadPLYSimple(path.c_str(), 1);
+            if (!pc_model_mat.data) {
+                yError() <<"Unable to find model";
+                return false;
+            }
+            yInfo() << "Loaded ply (" << pc_model_mat.rows << "," << pc_model_mat.cols << ")";
 
-                // Run ICP
-                ICP icp(100, 0.005f, 2.5f, 8);
-                double error;
-                cv::Matx44d T;
-                int res = icp.registerModelToScene(pc_model_mat, pc_object_normals, error, T);
-                if (res != 0) {
-                    yError() << "Could not register model to object";
-                    return false;
-                } else {
-                    yInfo() << "Registering model" << model_name << "to object with error" << error;
-                    viewer->addModel(path, toYarpMat(T));
-                    return true;
-                }
+            // Estimate normals
+            Mat pc_object_mat = toCvMat(pc_object);
+            yInfo() << "Point cloud (" << pc_object_mat.rows << "," << pc_object_mat.cols << ")";
+            Mat pc_object_normals;
+            cv::Vec3d viewpoint(0.0, 0.0, 0.0);
+            computeNormalsPC3d(pc_object_mat, pc_object_normals, 6, false, viewpoint);
+            yInfo() << "Point cloud with normals (" << pc_object_normals.rows << "," << pc_object_normals.cols << ")";
+
+            // Run ICP
+            ICP icp(100, 0.005f, 2.5f, 8);
+            double error;
+            cv::Matx44d T;
+            int res = icp.registerModelToScene(pc_object_normals, pc_model_mat, error, T);
+            if (res != 0) {
+                yError() << "Could not register model to object";
+                return false;
+            } else {
+                yInfo() << "Registering model" << model_name << "to object with error" << error;
+                std::vector<double> color{1.0, 0.0, 0.0};
+                viewer->addModel(path, yarp::math::SE3inv(toYarpMat(T)), color);
+                return true;
+            }
+        } else if (method=="pcl") {
+            // Load model
+            pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc_model_pcl(new pcl::PointCloud<pcl::PointXYZRGBA>);
+            if (pcl::io::loadPLYFile(path, *pc_model_pcl) < 0) {
+                yError() << "Could not load model";
+                return false;
+            }
+            yInfo() << "Loaded ply" << model_name << "with size" << pc_model_pcl->size();
+
+            // Copy yarp object to pcl object
+            pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc_object_pcl(new pcl::PointCloud<pcl::PointXYZRGBA>);
+            yarp::pcl::toPCL<yarp::sig::DataXYZRGBA, pcl::PointXYZRGBA>(*pc_object, *pc_object_pcl);
+
+            // Run icp
+            pcl::IterativeClosestPoint<pcl::PointXYZRGBA, pcl::PointXYZRGBA> icp;
+            icp.setInputSource(pc_object_pcl);
+            icp.setInputTarget(pc_model_pcl);
+
+            // Set the max correspondence distance to 50cm
+            icp.setMaxCorrespondenceDistance (0.5);
+            // Set the maximum number of iterations (criterion 1)
+            // This should be large if initial alignment is poor
+            icp.setMaximumIterations (500);
+            // Set the transformation epsilon (criterion 2)
+            icp.setTransformationEpsilon (1e-8);
+            // Set the euclidean distance difference epsilon (criterion 3)
+            icp.setEuclideanFitnessEpsilon (1e-9);
+            // Perform the alignment
+            icp.align(*pc_object_pcl);
+
+//            icp.setRANSACIterations(5);
+            Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+            if (icp.hasConverged())
+            {
+                yInfo() << "ICP has converged with score" << icp.getFitnessScore();
+//                Eigen::Vector4f centroid;
+//                pcl::compute3DCentroid(*pc_model_pcl, centroid);
+                T = icp.getFinalTransformation().cast<double>();
+                std::vector<double> color{0.0, 1.0, 0.0};
+                yarp::sig::Matrix Ty = toYarpMat(T);
+                viewer->addModel(path, yarp::math::SE3inv(Ty), color);
+                return true;
+            }
+            else
+            {
+                yError() << "ICP has not converged";
+                return false;
+            }
+        } else {
+            yError() << "Method not handled";
+            return false;
+        }
+        return true;
+    }
+
+    /**************************************************************************/
+    pcl::PointCloud<pcl::PointNormal>::Ptr estimateNormals(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc)
+    {
+        pcl::NormalEstimation<pcl::PointXYZRGBA, pcl::PointNormal> ne;
+        ne.setInputCloud(pc);
+        pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZRGBA> ());
+        ne.setSearchMethod(tree);
+        pcl::PointCloud<pcl::PointNormal>::Ptr pc_normals(new pcl::PointCloud<pcl::PointNormal>);
+        ne.setRadiusSearch(0.03);
+        ne.compute(*pc_normals);
+        return pc_normals;
+    }
+
+    /**************************************************************************/
+    yarp::sig::Matrix toYarpMat(const Eigen::Matrix4d &M) {
+        yarp::sig::Matrix yM(M.rows(), M.cols());
+        for (size_t i = 0; i < M.rows(); i++) {
+            for (size_t j = 0; j < M.cols(); j++) {
+                yM(i,j) = M.coeff(i,j);
             }
         }
-        yError() << "No object to fit!";
-        return false;
+        return yM;
     }
 
     /**************************************************************************/
@@ -506,8 +592,8 @@ class GrasperModule : public RFModule, public rpc_IDL {
         viewer->focusOnSuperquadric();
 
         const Vector sqCenter{sqParams.get(0).asDouble(),
-                              sqParams.get(1).asDouble(),
-                              sqParams.get(2).asDouble()};
+                    sqParams.get(1).asDouble(),
+                    sqParams.get(2).asDouble()};
 
         // keep gazing at the object
         IGazeControl* igaze;
@@ -557,15 +643,15 @@ class GrasperModule : public RFModule, public rpc_IDL {
         IPositionControl* ihand;
         int context;
         if (type == "right") {
-             grasper = grasper_r;
-             hand_r.view(ihand);
-             arm_r.view(iarm);
-             context = candidates_r.second;
+            grasper = grasper_r;
+            hand_r.view(ihand);
+            arm_r.view(iarm);
+            context = candidates_r.second;
         } else {
-             grasper = grasper_l;
-             hand_l.view(ihand);
-             arm_l.view(iarm);
-             context = candidates_l.second;
+            grasper = grasper_l;
+            hand_l.view(ihand);
+            arm_l.view(iarm);
+            context = candidates_l.second;
         }
 
         // target pose that allows grasping the object
@@ -592,7 +678,7 @@ class GrasperModule : public RFModule, public rpc_IDL {
         const auto dir = x - sqCenter;
         iarm->goToPoseSync(x + .05 * dir / norm(dir), o);
         iarm->waitMotionDone(.1, 3.);
-        
+
         // reach for the object
         iarm->goToPoseSync(x, o);
         iarm->waitMotionDone(.1, 3.);

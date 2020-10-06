@@ -239,7 +239,8 @@ public:
     }
 
     /**************************************************************************/
-    void addModel(const std::string &model_name, const yarp::sig::Matrix &T) {
+    void addModel(const std::string &model_name, const yarp::sig::Matrix &T,
+                  std::vector<double> &color) {
         std::lock_guard<std::mutex> lck(mtx);
         if (vtk_model_actor) {
             vtk_renderer->RemoveActor(vtk_model_actor);
@@ -254,13 +255,14 @@ public:
 
         vtk_model_actor = vtkSmartPointer<vtkActor>::New();
         vtk_model_actor->SetMapper(vtk_model_mapper);
-        vtk_model_actor->GetProperty()->SetColor(0.0, 1.0, 0.0);
+        vtk_model_actor->GetProperty()->SetColor(color.data());
+        vtk_model_actor->GetProperty()->SetOpacity(.6);
 
         vtk_model_transform = vtkSmartPointer<vtkTransform>::New();
-        vtk_model_transform->Scale(0.05, 0.05, 0.05);
         const auto axisangle = yarp::math::dcm2axis(T);
-        vtk_model_transform->RotateWXYZ((180. / M_PI) * axisangle[3], axisangle.subVector(0, 2).data());
-        vtk_model_transform->Translate(0, 0, 0);
+        double angle = ((180. / M_PI) * axisangle[3]);
+        vtk_model_transform->Translate(T.subcol(0, 3, 3).data());
+        vtk_model_transform->RotateWXYZ(angle, axisangle.subVector(0, 2).data());
         vtk_model_actor->SetUserTransform(vtk_model_transform);
 
         vtk_renderer->AddActor(vtk_model_actor);

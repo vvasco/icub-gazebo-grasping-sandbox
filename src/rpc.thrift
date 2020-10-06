@@ -37,9 +37,10 @@ service rpc_IDL
    /**
    * Fit the object point cloud with the provided model.
    * @param model_name name of the ply model to look for.
+   * @param method method to use (opencv default or pcl).
    * @return true/false on success/failure.
    */
-   bool fit(1:string model_name);
+   bool fit(1:string model_name, 2:string method="pcl");
 
    /**
    * Grasp the object.
