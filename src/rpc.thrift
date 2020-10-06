@@ -32,7 +32,14 @@ service rpc_IDL
    * Fit the object point cloud with a superquadric.
    * @return true/false on success/failure.
    */
-   bool fit();
+   bool fit_sq();
+
+   /**
+   * Fit the object point cloud with the provided model.
+   * @param model_name name of the ply model to look for.
+   * @return true/false on success/failure.
+   */
+   bool fit(1:string model_name);
 
    /**
    * Grasp the object.

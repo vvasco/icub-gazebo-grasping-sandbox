@@ -35,6 +35,11 @@
 #include <yarp/sig/Image.h>
 #include <yarp/sig/PointCloud.h>
 #include <yarp/math/Math.h>
+#include <yarp/cv/Cv.h>
+
+#include <opencv2/surface_matching.hpp>
+#include <opencv2/surface_matching/ppf_helpers.hpp>
+#include <opencv2/core/utility.hpp>
 
 #include "rpc_IDL.h"
 #include "viewer.h"
@@ -46,12 +51,16 @@ using namespace yarp::os;
 using namespace yarp::dev;
 using namespace yarp::sig;
 using namespace yarp::math;
+using namespace yarp::cv;
 using namespace viewer;
 using namespace segmentation;
 using namespace cardinal_points_grasp;
+using namespace cv;
+using namespace ppf_match_3d;
 
 /******************************************************************************/
 class GrasperModule : public RFModule, public rpc_IDL {
+    ResourceFinder rf;
     PolyDriver arm_r,arm_l;
     PolyDriver hand_r,hand_l;
     PolyDriver gaze;
@@ -143,6 +152,7 @@ class GrasperModule : public RFModule, public rpc_IDL {
 
     /**************************************************************************/
     bool configure(ResourceFinder& rf) override {
+        this->rf = rf;
         const string name = "icub-grasp";
 
         Property arm_r_options;
@@ -243,7 +253,7 @@ class GrasperModule : public RFModule, public rpc_IDL {
         if (randomize()) {
             if (home()) {
                 if (segment()) {
-                    if (fit()) {
+                    if (fit_sq()) {
                         if (grasp()) {
                             return true;
                         }
@@ -394,7 +404,7 @@ class GrasperModule : public RFModule, public rpc_IDL {
     }
 
     /**************************************************************************/
-    bool fit() override {
+    bool fit_sq() override {
         if (pc_object) {
             if (pc_object->size() > 0) {
                 if (sqPort.getOutputCount() > 0) {
@@ -416,6 +426,74 @@ class GrasperModule : public RFModule, public rpc_IDL {
         
         yError() << "No object to fit!";
         return false;
+    }
+
+    /**************************************************************************/
+    bool fit(const string &model_name) override {
+        // load model
+        yInfo() << "Looking for" << model_name;
+        string path = rf.findFileByName(model_name);
+        if (path.empty()) {
+            yError() <<"Unable to find model";
+            return false;
+        }
+        Mat pc_model_mat = loadPLYSimple(path.c_str(), 1);
+        if (!pc_model_mat.data) {
+            yError() <<"Unable to find model";
+            return false;
+        }
+        yInfo() << "Loaded ply (" << pc_model_mat.rows << "," << pc_model_mat.cols << ")";
+        if (pc_object) {
+            if (pc_object->size() > 0) {
+
+                // Estimate normals
+                Mat pc_object_mat = toCvMat(pc_object);
+                yInfo() << "Point cloud (" << pc_object_mat.rows << "," << pc_object_mat.cols << ")";
+                Mat pc_object_normals;
+                cv::Vec3d viewpoint(0.0, 0.0, 0.0);
+                computeNormalsPC3d(pc_object_mat, pc_object_normals, 6, false, viewpoint);
+                yInfo() << "Point cloud with normals (" << pc_object_normals.rows << "," << pc_object_normals.cols << ")";
+
+                // Run ICP
+                ICP icp(100, 0.005f, 2.5f, 8);
+                double error;
+                cv::Matx44d T;
+                int res = icp.registerModelToScene(pc_model_mat, pc_object_normals, error, T);
+                if (res != 0) {
+                    yError() << "Could not register model to object";
+                    return false;
+                } else {
+                    yInfo() << "Registering model" << model_name << "to object with error" << error;
+                    viewer->addModel(path, toYarpMat(T));
+                    return true;
+                }
+            }
+        }
+        yError() << "No object to fit!";
+        return false;
+    }
+
+    /**************************************************************************/
+    yarp::sig::Matrix toYarpMat(const cv::Matx44d &M) {
+        yarp::sig::Matrix yM(M.rows, M.cols);
+        for (size_t i = 0; i < M.rows; i++) {
+            for (size_t j = 0; j < M.cols; j++) {
+                yM(i,j) = M(i,j);
+            }
+        }
+        return yM;
+    }
+
+    /**************************************************************************/
+    Mat toCvMat(shared_ptr<yarp::sig::PointCloud<DataXYZRGBA>> pc) {
+        Mat mat(pc->size(), 3, CV_64FC1);
+        for (size_t i = 0; i < pc->size(); i++) {
+            auto& p = (*pc)(i);
+            mat.at<double>(i,0) = p.x;
+            mat.at<double>(i,1) = p.y;
+            mat.at<double>(i,2) = p.z;
+        }
+        return mat;
     }
 
     /**************************************************************************/
@@ -597,6 +675,7 @@ int main(int argc, char *argv[]) {
 
     ResourceFinder rf;
     rf.configure(argc,argv);
+    rf.setDefaultContext("icub-gazebo-grasping-sandbox");
 
     GrasperModule module;
     return module.runModule(rf);

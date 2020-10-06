@@ -36,6 +36,7 @@
 #include <vtkRenderer.h>
 #include <vtkCamera.h>
 #include <vtkInteractorStyleSwitch.h>
+#include <vtkPLYReader.h>
 
 #include <yarp/os/Value.h>
 #include <yarp/os/Bottle.h>
@@ -108,6 +109,11 @@ class Viewer {
     std::vector<vtkSmartPointer<vtkPolyDataMapper>> vtk_arrows_mappers;
     std::vector<vtkSmartPointer<vtkTransform>>      vtk_arrows_transforms;
     std::vector<vtkSmartPointer<vtkActor>>          vtk_arrows_actors;
+
+    vtkSmartPointer<vtkPLYReader>                   vtk_model_reader{nullptr};
+    vtkSmartPointer<vtkPolyDataMapper>              vtk_model_mapper{nullptr};
+    vtkSmartPointer<vtkActor>                       vtk_model_actor{nullptr};
+    vtkSmartPointer<vtkTransform>                   vtk_model_transform{nullptr};
 
     yarp::os::Bottle sqParams;
 
@@ -230,6 +236,34 @@ public:
         vtk_object_actor->GetProperty()->SetPointSize(1);
 
         vtk_renderer->AddActor(vtk_object_actor);
+    }
+
+    /**************************************************************************/
+    void addModel(const std::string &model_name, const yarp::sig::Matrix &T) {
+        std::lock_guard<std::mutex> lck(mtx);
+        if (vtk_model_actor) {
+            vtk_renderer->RemoveActor(vtk_model_actor);
+        }
+
+        vtk_model_reader = vtkSmartPointer<vtkPLYReader>::New();
+        vtk_model_reader->SetFileName( model_name.c_str() );
+        vtk_model_reader->Update();
+
+        vtk_model_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        vtk_model_mapper->SetInputConnection(vtk_model_reader->GetOutputPort());
+
+        vtk_model_actor = vtkSmartPointer<vtkActor>::New();
+        vtk_model_actor->SetMapper(vtk_model_mapper);
+        vtk_model_actor->GetProperty()->SetColor(0.0, 1.0, 0.0);
+
+        vtk_model_transform = vtkSmartPointer<vtkTransform>::New();
+        vtk_model_transform->Scale(0.05, 0.05, 0.05);
+        const auto axisangle = yarp::math::dcm2axis(T);
+        vtk_model_transform->RotateWXYZ((180. / M_PI) * axisangle[3], axisangle.subVector(0, 2).data());
+        vtk_model_transform->Translate(0, 0, 0);
+        vtk_model_actor->SetUserTransform(vtk_model_transform);
+
+        vtk_renderer->AddActor(vtk_model_actor);
     }
 
     /**************************************************************************/
