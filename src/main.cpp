@@ -14,6 +14,7 @@
 #include <limits>
 #include <random>
 #include <fstream>
+#include <algorithm>
 
 #include <yarp/os/Network.h>
 #include <yarp/os/LogStream.h>
@@ -493,39 +494,54 @@ class GrasperModule : public RFModule, public rpc_IDL {
             pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc_object_pcl(new pcl::PointCloud<pcl::PointXYZRGBA>);
             yarp::pcl::toPCL<yarp::sig::DataXYZRGBA, pcl::PointXYZRGBA>(*pc_object, *pc_object_pcl);
 
-            // Run icp
-            pcl::IterativeClosestPoint<pcl::PointXYZRGBA, pcl::PointXYZRGBA> icp;
-            icp.setInputSource(pc_object_pcl);
-            icp.setInputTarget(pc_model_pcl);
+            // Segment point clouds
+            std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters = Segmentation::extractClusters(pc_object_pcl);
 
-            // Set the max correspondence distance to 50cm
-            icp.setMaxCorrespondenceDistance (0.5);
-            // Set the maximum number of iterations (criterion 1)
-            // This should be large if initial alignment is poor
-            icp.setMaximumIterations (500);
-            // Set the transformation epsilon (criterion 2)
-            icp.setTransformationEpsilon (1e-8);
-            // Set the euclidean distance difference epsilon (criterion 3)
-            icp.setEuclideanFitnessEpsilon (1e-9);
-            // Perform the alignment
-            icp.align(*pc_object_pcl);
-
-//            icp.setRANSACIterations(5);
-            Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
-            if (icp.hasConverged())
+            // Run icp for each point cloud
+            std::vector<double> scores(clusters.size(), std::numeric_limits<double>::infinity());
+            std::vector<Eigen::Matrix4d> T(clusters.size(), Eigen::Matrix4d::Identity());
+            for (size_t i = 0; i < clusters.size(); i++)
             {
-                yInfo() << "ICP has converged with score" << icp.getFitnessScore();
-//                Eigen::Vector4f centroid;
-//                pcl::compute3DCentroid(*pc_model_pcl, centroid);
-                T = icp.getFinalTransformation().cast<double>();
-                std::vector<double> color{0.0, 1.0, 0.0};
-                yarp::sig::Matrix Ty = toYarpMat(T);
-                viewer->addModel(path, yarp::math::SE3inv(Ty), color);
-                return true;
+                pcl::IterativeClosestPoint<pcl::PointXYZRGBA, pcl::PointXYZRGBA> icp;
+                icp.setInputSource(clusters[i]);
+                icp.setInputTarget(pc_model_pcl);
+
+                // Set the max correspondence distance to 50cm
+                icp.setMaxCorrespondenceDistance (0.5);
+                // Set the maximum number of iterations (criterion 1)
+                // This should be large if initial alignment is poor
+                icp.setMaximumIterations (500);
+                // Set the transformation epsilon (criterion 2)
+                icp.setTransformationEpsilon (1e-8);
+                // Set the euclidean distance difference epsilon (criterion 3)
+                icp.setEuclideanFitnessEpsilon (1e-9);
+                // Perform the alignment
+                icp.align(*clusters[i]);
+                if (icp.hasConverged())
+                {
+                    scores[i] = icp.getFitnessScore();
+                    yInfo() << "ICP has converged with score" << icp.getFitnessScore();
+                    T[i] = icp.getFinalTransformation().cast<double>();
+                }
+            }
+
+            // Select the one with lowest score
+            auto it=min_element(scores.begin(),scores.end());
+            std::cout << scores << std::endl;
+            if (it!=scores.end())
+            {
+                if (*it<numeric_limits<double>::infinity())
+                {
+                    auto i=distance(scores.begin(),it);
+                    auto Ty=toYarpMat(T[i]);
+                    std::vector<double> color{0.0, 1.0, 0.0};
+                    viewer->addModel(path, yarp::math::SE3inv(Ty), color);
+                    return true;
+                }
             }
             else
             {
-                yError() << "ICP has not converged";
+                yError() << "ICP has not found any match";
                 return false;
             }
         } else {

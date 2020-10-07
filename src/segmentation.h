@@ -18,6 +18,8 @@
 
 #include <yarp/sig/PointCloud.h>
 
+#include <pcl/segmentation/extract_clusters.h>
+
 namespace segmentation {
 
 /******************************************************************************/
@@ -69,6 +71,41 @@ public:
         }
 
         return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    /**************************************************************************/
+    static std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> extractClusters(
+            pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc_object_pcl) {
+
+        // Creating the KdTree object for the search method of the extraction
+        pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGBA>);
+        tree->setInputCloud(pc_object_pcl);
+
+        std::vector<pcl::PointIndices> cluster_indices;
+        pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
+        ec.setClusterTolerance(0.02); // 2cm
+        ec.setMinClusterSize(100);
+        ec.setMaxClusterSize(25000);
+        ec.setSearchMethod(tree);
+        ec.setInputCloud(pc_object_pcl);
+        ec.extract(cluster_indices);
+
+        yInfo() << "Found" << cluster_indices.size() << "point cloud clusters";
+        std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters;
+        for (auto it = cluster_indices.begin(); it != cluster_indices.end (); ++it)
+        {
+            pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZRGBA>);
+            for (auto pit = it->indices.begin (); pit != it->indices.end (); ++pit) {
+                cloud_cluster->push_back((*pc_object_pcl)[*pit]);
+            }
+            cloud_cluster->width = cloud_cluster->size();
+            cloud_cluster->height = 1;
+            cloud_cluster->is_dense = true;
+            clusters.push_back(cloud_cluster);
+            yInfo() << "PointCloud representing the Cluster: " << cloud_cluster->size() << " data points.";
+        }
+
+        return clusters;
     }
 };
 
