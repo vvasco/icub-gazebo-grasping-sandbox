@@ -207,6 +207,10 @@ public:
             vtk_renderer->RemoveActor(vtk_object_actor);
         }
 
+        if (vtk_model_actor) {
+            vtk_renderer->RemoveActor(vtk_model_actor);
+        }
+
         vtk_object_points = vtkSmartPointer<vtkPoints>::New();
         vtk_object_colors = vtkSmartPointer<vtkUnsignedCharArray>::New();
         vtk_object_colors->SetNumberOfComponents(3);
