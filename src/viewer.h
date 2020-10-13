@@ -12,6 +12,7 @@
 #include <vector>
 #include <cmath>
 #include <limits>
+#include <random>
 
 #include <vtkSmartPointer.h>
 #include <vtkCommand.h>
@@ -37,11 +38,16 @@
 #include <vtkCamera.h>
 #include <vtkInteractorStyleSwitch.h>
 #include <vtkPLYReader.h>
+#include <vtkOBJReader.h>
+#include <vtkSphereSource.h>
 
 #include <yarp/os/Value.h>
 #include <yarp/os/Bottle.h>
 #include <yarp/sig/PointCloud.h>
 #include <yarp/math/Math.h>
+
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
 
 #include "cardinal_points_grasp.h"
 
@@ -111,9 +117,13 @@ class Viewer {
     std::vector<vtkSmartPointer<vtkActor>>          vtk_arrows_actors;
 
     vtkSmartPointer<vtkPLYReader>                   vtk_model_reader{nullptr};
+//    vtkSmartPointer<vtkOBJReader>                   vtk_model_reader{nullptr};
     vtkSmartPointer<vtkPolyDataMapper>              vtk_model_mapper{nullptr};
     vtkSmartPointer<vtkActor>                       vtk_model_actor{nullptr};
     vtkSmartPointer<vtkTransform>                   vtk_model_transform{nullptr};
+
+    std::vector<vtkSmartPointer<vtkActor>>          vtk_clusters_actors;
+    std::vector<vtkSmartPointer<vtkActor>>          vtk_centroids_actors;
 
     yarp::os::Bottle sqParams;
 
@@ -207,6 +217,10 @@ public:
             vtk_renderer->RemoveActor(vtk_object_actor);
         }
 
+//        if (vtk_cluster_actor) {
+//            vtk_renderer->RemoveActor(vtk_cluster_actor);
+//        }
+
         if (vtk_model_actor) {
             vtk_renderer->RemoveActor(vtk_model_actor);
         }
@@ -243,14 +257,84 @@ public:
     }
 
     /**************************************************************************/
-    void addModel(const std::string &model_name, const yarp::sig::Matrix &T,
-                  std::vector<double> &color) {
+    void addClusters(const std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> &clusters)
+    {
         std::lock_guard<std::mutex> lck(mtx);
-        if (vtk_model_actor) {
-            vtk_renderer->RemoveActor(vtk_model_actor);
+        if (!vtk_clusters_actors.empty()) {
+            for (auto vtk_actor:vtk_clusters_actors) {
+                vtk_renderer->RemoveActor(vtk_actor);
+            }
         }
 
+        std::uniform_real_distribution<double> unif(0.0, 1.0);
+        std::default_random_engine re;
+        for (const auto& c:clusters) {
+
+            std::vector<double> color{unif(re), unif(re), unif(re)};
+            vtkSmartPointer<vtkPoints> vtk_points = vtkSmartPointer<vtkPoints>::New();
+            for (size_t i = 0; i < c->size(); i++) {
+                const auto& p = (*c)[i];
+                vtk_points->InsertNextPoint(p.x, p.y, p.z);
+            }
+
+            vtkSmartPointer<vtkPolyData> vtk_polydata = vtkSmartPointer<vtkPolyData>::New();
+            vtk_polydata->SetPoints(vtk_points);
+
+            vtkSmartPointer<vtkVertexGlyphFilter> vtk_filter = vtkSmartPointer<vtkVertexGlyphFilter>::New();
+            vtk_filter->SetInputData(vtk_polydata);
+            vtk_filter->Update();
+
+            vtkSmartPointer<vtkPolyDataMapper> vtk_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+            vtk_mapper->SetInputConnection(vtk_filter->GetOutputPort());
+
+            vtkSmartPointer<vtkActor> vtk_actor = vtkSmartPointer<vtkActor>::New();
+            vtk_actor->SetMapper(vtk_mapper);
+            vtk_actor->GetProperty()->SetColor(color.data());
+            vtk_actor->GetProperty()->SetPointSize(1);
+
+            vtk_clusters_actors.push_back(vtk_actor);
+            vtk_renderer->AddActor(vtk_actor);
+        }
+    }
+
+    /**************************************************************************/
+    void addCentroids(const std::vector<pcl::PointXYZRGBA> &centroids)
+    {
+        std::lock_guard<std::mutex> lck(mtx);
+        if (!vtk_centroids_actors.empty()) {
+            for (auto vtk_actor:vtk_centroids_actors) {
+                vtk_renderer->RemoveActor(vtk_actor);
+            }
+        }
+
+        for (const auto& c:centroids) {
+            vtkSmartPointer<vtkSphereSource> vtk_sphere = vtkSmartPointer<vtkSphereSource>::New();
+            vtk_sphere->SetCenter(c.x, c.y, c.z);
+            vtk_sphere->SetRadius(0.003);
+            // Make the surface smooth.
+            vtk_sphere->SetPhiResolution(100);
+            vtk_sphere->SetThetaResolution(100);
+
+            vtkSmartPointer<vtkPolyDataMapper> vtk_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+            vtk_mapper->SetInputConnection(vtk_sphere->GetOutputPort());
+
+            vtkSmartPointer<vtkActor> vtk_actor = vtkSmartPointer<vtkActor>::New();
+            vtk_actor->SetMapper(vtk_mapper);
+            vtk_actor->GetProperty()->SetColor(0.0, 0.0, 1.0);
+            vtk_actor->GetProperty()->SetPointSize(7);
+
+            vtk_centroids_actors.push_back(vtk_actor);
+            vtk_renderer->AddActor(vtk_actor);
+        }
+    }
+
+    /**************************************************************************/
+    void addModel(const std::string &model_name, const yarp::sig::Matrix &T,
+                  std::vector<double> &color, const double &opacity=0.5) {
+        std::lock_guard<std::mutex> lck(mtx);
+
         vtk_model_reader = vtkSmartPointer<vtkPLYReader>::New();
+//        vtk_model_reader = vtkSmartPointer<vtkOBJReader>::New();
         vtk_model_reader->SetFileName( model_name.c_str() );
         vtk_model_reader->Update();
 
@@ -260,7 +344,7 @@ public:
         vtk_model_actor = vtkSmartPointer<vtkActor>::New();
         vtk_model_actor->SetMapper(vtk_model_mapper);
         vtk_model_actor->GetProperty()->SetColor(color.data());
-        vtk_model_actor->GetProperty()->SetOpacity(.6);
+        vtk_model_actor->GetProperty()->SetOpacity(opacity);
 
         vtk_model_transform = vtkSmartPointer<vtkTransform>::New();
         const auto axisangle = yarp::math::dcm2axis(T);
@@ -270,6 +354,12 @@ public:
         vtk_model_actor->SetUserTransform(vtk_model_transform);
 
         vtk_renderer->AddActor(vtk_model_actor);
+    }
+
+    /**************************************************************************/
+    void clean() {
+        std::lock_guard<std::mutex> lck(mtx);
+        vtk_renderer->RemoveAllViewProps();
     }
 
     /**************************************************************************/

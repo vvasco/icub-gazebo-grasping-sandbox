@@ -36,18 +36,17 @@
 #include <yarp/sig/Image.h>
 #include <yarp/sig/PointCloud.h>
 #include <yarp/math/Math.h>
-#include <yarp/cv/Cv.h>
 #include <yarp/pcl/Pcl.h>
-
-#include <opencv2/surface_matching.hpp>
-#include <opencv2/surface_matching/ppf_helpers.hpp>
-#include <opencv2/core/utility.hpp>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/features/normal_3d.h>
 #include <pcl/registration/icp.h>
+#include <pcl/conversions.h>
+#include <pcl/io/io.h>
+#include <pcl/io/vtk_lib_io.h>
 #include <pcl/io/ply_io.h>
+#include <pcl/io/obj_io.h>
 
 #include "rpc_IDL.h"
 #include "viewer.h"
@@ -59,12 +58,9 @@ using namespace yarp::os;
 using namespace yarp::dev;
 using namespace yarp::sig;
 using namespace yarp::math;
-using namespace yarp::cv;
 using namespace viewer;
 using namespace segmentation;
 using namespace cardinal_points_grasp;
-using namespace cv;
-using namespace ppf_match_3d;
 
 /******************************************************************************/
 class GrasperModule : public RFModule, public rpc_IDL {
@@ -91,6 +87,7 @@ class GrasperModule : public RFModule, public rpc_IDL {
     Bottle sqParams;
     
     unique_ptr<Viewer> viewer;
+    bool guess{false};
     
     /**************************************************************************/
     bool attach(RpcServer& source) override {
@@ -436,7 +433,7 @@ class GrasperModule : public RFModule, public rpc_IDL {
     }
 
     /**************************************************************************/
-    bool fit(const string &model_name, const string &method="pcl") override {
+    bool fit(const string &model_name) override {
         // load model
         yInfo() << "Looking for" << model_name;
         string path = rf.findFileByName(model_name);
@@ -450,118 +447,121 @@ class GrasperModule : public RFModule, public rpc_IDL {
             return false;
         }
 
-        if (method=="opencv") {
-            // Load model assuming it has normals
-            Mat pc_model_mat = loadPLYSimple(path.c_str(), 1);
-            if (!pc_model_mat.data) {
-                yError() <<"Unable to find model";
-                return false;
-            }
-            yInfo() << "Loaded ply (" << pc_model_mat.rows << "," << pc_model_mat.cols << ")";
+        // Load model
+        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc_model_pcl(new pcl::PointCloud<pcl::PointXYZRGBA>);
+//        pcl::PolygonMesh mesh;
+//        if (pcl::io::loadPolygonFile(path, mesh) == 0)
+//        {
+//            yError() << "Could not load model";
+//            return false;
+//        }
+//        pcl::fromPCLPointCloud2(mesh.cloud, *pc_model_pcl);
 
-            // Estimate normals
-            Mat pc_object_mat = toCvMat(pc_object);
-            yInfo() << "Point cloud (" << pc_object_mat.rows << "," << pc_object_mat.cols << ")";
-            Mat pc_object_normals;
-            cv::Vec3d viewpoint(0.0, 0.0, 0.0);
-            computeNormalsPC3d(pc_object_mat, pc_object_normals, 6, false, viewpoint);
-            yInfo() << "Point cloud with normals (" << pc_object_normals.rows << "," << pc_object_normals.cols << ")";
+//        if (pcl::io::loadOBJFile(path, *pc_model_pcl) < 0)
+//        {
+//            yError() << "Could not load model";
+//            return false;
+//        }
 
-            // Run ICP
-            ICP icp(100, 0.005f, 2.5f, 8);
-            double error;
-            cv::Matx44d T;
-            int res = icp.registerModelToScene(pc_object_normals, pc_model_mat, error, T);
-            if (res != 0) {
-                yError() << "Could not register model to object";
-                return false;
-            } else {
-                yInfo() << "Registering model" << model_name << "to object with error" << error;
-                std::vector<double> color{1.0, 0.0, 0.0};
-                viewer->addModel(path, yarp::math::SE3inv(toYarpMat(T)), color);
-                return true;
-            }
-        } else if (method=="pcl") {
-            // Load model
-            pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc_model_pcl(new pcl::PointCloud<pcl::PointXYZRGBA>);
-            if (pcl::io::loadPLYFile(path, *pc_model_pcl) < 0) {
-                yError() << "Could not load model";
-                return false;
-            }
-            yInfo() << "Loaded ply" << model_name << "with size" << pc_model_pcl->size();
+        if (pcl::io::loadPLYFile(path, *pc_model_pcl) < 0) {
+            yError() << "Could not load model";
+            return false;
+        }
+        yInfo() << "Loaded ply" << model_name << "with size" << pc_model_pcl->size();
 
-            // Copy yarp object to pcl object
-            pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc_object_pcl(new pcl::PointCloud<pcl::PointXYZRGBA>);
-            yarp::pcl::toPCL<yarp::sig::DataXYZRGBA, pcl::PointXYZRGBA>(*pc_object, *pc_object_pcl);
+        // Compute centroid model
+        pcl::PointXYZRGBA c_model;
+        pcl::computeCentroid(*pc_model_pcl, c_model);
 
-            // Segment point clouds
-            std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters = Segmentation::extractClusters(pc_object_pcl);
+        // Copy yarp object to pcl object
+        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc_object_pcl(new pcl::PointCloud<pcl::PointXYZRGBA>);
+        yarp::pcl::toPCL<yarp::sig::DataXYZRGBA, pcl::PointXYZRGBA>(*pc_object, *pc_object_pcl);
 
-            // Run icp for each point cloud
-            std::vector<double> scores(clusters.size(), std::numeric_limits<double>::infinity());
-            std::vector<Eigen::Matrix4d> T(clusters.size(), Eigen::Matrix4d::Identity());
-            for (size_t i = 0; i < clusters.size(); i++)
+        // Segment point clouds
+        std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters = Segmentation::extractClusters(pc_object_pcl);
+        viewer->addClusters(clusters);
+
+        // Run icp for each point cloud
+        std::vector<double> scores(clusters.size(), std::numeric_limits<double>::infinity());
+        std::vector<Eigen::Matrix4d> T(clusters.size(), Eigen::Matrix4d::Identity());
+        std::vector<pcl::PointXYZRGBA> centroids(clusters.size());
+        for (size_t i = 0; i < clusters.size(); i++) {
+
+            // Compute the centroid of the point cloud
+            pcl::PointXYZRGBA c_i;
+            pcl::computeCentroid(*clusters[i], c_i);
+            centroids.push_back(c_i);
+
+            pcl::IterativeClosestPoint<pcl::PointXYZRGBA, pcl::PointXYZRGBA> icp;
+            icp.setInputSource(clusters[i]);
+            icp.setInputTarget(pc_model_pcl);
+
+            // Set the max correspondence distance to 50cm
+            icp.setMaxCorrespondenceDistance (50.0); //(0.5);
+            // Set the maximum number of iterations (criterion 1)
+            // This should be large if initial alignment is poor
+            icp.setMaximumIterations (2000);
+            // Set the transformation epsilon (criterion 2)
+            icp.setTransformationEpsilon (1e-8);
+            // Set the euclidean distance difference epsilon (criterion 3)
+            icp.setEuclideanFitnessEpsilon (1e-9);
+            // Perform the alignment
+            if (guess)
             {
-                pcl::IterativeClosestPoint<pcl::PointXYZRGBA, pcl::PointXYZRGBA> icp;
-                icp.setInputSource(clusters[i]);
-                icp.setInputTarget(pc_model_pcl);
-
-                // Set the max correspondence distance to 50cm
-                icp.setMaxCorrespondenceDistance (0.5);
-                // Set the maximum number of iterations (criterion 1)
-                // This should be large if initial alignment is poor
-                icp.setMaximumIterations (500);
-                // Set the transformation epsilon (criterion 2)
-                icp.setTransformationEpsilon (1e-8);
-                // Set the euclidean distance difference epsilon (criterion 3)
-                icp.setEuclideanFitnessEpsilon (1e-9);
-                // Perform the alignment
-                icp.align(*clusters[i]);
-                if (icp.hasConverged())
-                {
-                    scores[i] = icp.getFitnessScore();
-                    yInfo() << "ICP has converged with score" << icp.getFitnessScore();
-                    T[i] = icp.getFinalTransformation().cast<double>();
-                }
-            }
-
-            // Select the one with lowest score
-            auto it=min_element(scores.begin(),scores.end());
-            std::cout << scores << std::endl;
-            if (it!=scores.end())
-            {
-                if (*it<numeric_limits<double>::infinity())
-                {
-                    auto i=distance(scores.begin(),it);
-                    auto Ty=toYarpMat(T[i]);
-                    std::vector<double> color{0.0, 1.0, 0.0};
-                    viewer->addModel(path, yarp::math::SE3inv(Ty), color);
-                    return true;
-                }
+                // Use the point cloud centroid to perform initial alignment
+                yInfo() << "Adding initial guess";
+                Eigen::Matrix4f guessM(Eigen::Matrix4f::Identity());
+                // We need to account for model centroid, because the model origin is in a different position
+                guessM(0,3) = c_i.x - c_model.x;
+                guessM(1,3) = c_i.y - c_model.y;
+                guessM(2,3) = c_i.z - c_model.z;
+                icp.align(*clusters[i], guessM);
+                auto Tya=toYarpMat(guessM);
+                std::vector<double> color{1.0, 1.0, 1.0};
+                viewer->addModel(path, Tya, color, 0.3);
             }
             else
             {
-                yError() << "ICP has not found any match";
-                return false;
+                yInfo() << "No initial guess";
+                icp.align(*clusters[i]);
+            }
+
+            if (icp.hasConverged())
+            {
+                scores[i] = icp.getFitnessScore();
+                yInfo() << "ICP has converged with score" << scores[i];
+                T[i] = icp.getFinalTransformation().cast<double>();
+            }
+        }
+        viewer->addCentroids(centroids);
+
+        // Select the one with lowest score
+        auto it=min_element(scores.begin(),scores.end());
+        std::cout << "Scores: " << scores << std::endl;
+        yarp::sig::Matrix Ty=eye(4,4);
+        if (it!=scores.end()) {
+            if (*it<numeric_limits<double>::infinity()) {
+                auto i=distance(scores.begin(),it);
+                Ty=toYarpMat(T[i]);
+                std::vector<double> color{1.0, 0.0, 0.0};
+                viewer->addModel(path, yarp::math::SE3inv(Ty), color);
             }
         } else {
-            yError() << "Method not handled";
-            return false;
+            yError() << "ICP has not found any match";
         }
         return true;
     }
 
     /**************************************************************************/
-    pcl::PointCloud<pcl::PointNormal>::Ptr estimateNormals(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr pc)
-    {
-        pcl::NormalEstimation<pcl::PointXYZRGBA, pcl::PointNormal> ne;
-        ne.setInputCloud(pc);
-        pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZRGBA> ());
-        ne.setSearchMethod(tree);
-        pcl::PointCloud<pcl::PointNormal>::Ptr pc_normals(new pcl::PointCloud<pcl::PointNormal>);
-        ne.setRadiusSearch(0.03);
-        ne.compute(*pc_normals);
-        return pc_normals;
+    bool set_guess(const bool guess) override {
+        this->guess=guess;
+        return true;
+    }
+
+    /**************************************************************************/
+    bool clean_viewer() override {
+        viewer->clean();
+        return true;
     }
 
     /**************************************************************************/
@@ -576,26 +576,14 @@ class GrasperModule : public RFModule, public rpc_IDL {
     }
 
     /**************************************************************************/
-    yarp::sig::Matrix toYarpMat(const cv::Matx44d &M) {
-        yarp::sig::Matrix yM(M.rows, M.cols);
-        for (size_t i = 0; i < M.rows; i++) {
-            for (size_t j = 0; j < M.cols; j++) {
-                yM(i,j) = M(i,j);
+    yarp::sig::Matrix toYarpMat(const Eigen::Matrix4f &M) {
+        yarp::sig::Matrix yM(M.rows(), M.cols());
+        for (size_t i = 0; i < M.rows(); i++) {
+            for (size_t j = 0; j < M.cols(); j++) {
+                yM(i,j) = M.coeff(i,j);
             }
         }
         return yM;
-    }
-
-    /**************************************************************************/
-    Mat toCvMat(shared_ptr<yarp::sig::PointCloud<DataXYZRGBA>> pc) {
-        Mat mat(pc->size(), 3, CV_64FC1);
-        for (size_t i = 0; i < pc->size(); i++) {
-            auto& p = (*pc)(i);
-            mat.at<double>(i,0) = p.x;
-            mat.at<double>(i,1) = p.y;
-            mat.at<double>(i,2) = p.z;
-        }
-        return mat;
     }
 
     /**************************************************************************/

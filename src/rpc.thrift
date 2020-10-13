@@ -37,10 +37,9 @@ service rpc_IDL
    /**
    * Fit the object point cloud with the provided model.
    * @param model_name name of the ply model to look for.
-   * @param method method to use (opencv default or pcl).
    * @return true/false on success/failure.
    */
-   bool fit(1:string model_name, 2:string method="pcl");
+   bool fit(1:string model_name);
 
    /**
    * Grasp the object.
@@ -53,4 +52,18 @@ service rpc_IDL
    * @return true/false on success/failure.
    */
    bool go();
+
+   /**
+   * Initialize icp with initial guess.
+   * @param guess true/false to activate/disactivate guess during icp.
+   * @return true/false on success/failure.
+   */
+   bool set_guess(1:bool guess);
+
+   /**
+   * Clean viewer.
+   * @return true/false on success/failure.
+   */
+   bool clean_viewer();
+
 }
